@@ -1,0 +1,31 @@
+# ==========================================
+# 调查问卷图片处理管道配置文件
+# ==========================================
+
+# ---- 豆包（Doubao）视觉大模型配置 ----
+doubao:
+  base_url: "https://ark.cn-beijing.volces.com/api/v3"
+  model: "doubao-seed-1-6-flash-250828"
+  # API Key 通过环境变量 ARK_API_KEY 提供
+
+# ---- DeepSeek（去冗余/格式统一）大模型配置 ----
+deepseek:
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
+  # API Key 通过环境变量 DEEPSEEK_API_KEY 提供
+
+# ---- 批处理参数 ----
+batch:
+  # 每批处理的图片数量
+  # 需要根据模型性能设置！
+  size: 4
+  # 相邻两批之间的重叠图片数量
+  # 建议值：1~2（图片较多时1张即可，图片较少时2张更保险）
+  overlap: 1
+
+# ---- 输入输出路径 ----
+paths:
+  # 数据根目录（其下的每个子目录视为一套独立的问卷）
+  survey_root: "survey_raw"
+  # 输出根目录
+  output_root: "llm-output"

@@ -1,0 +1,10 @@
+__pycache__/
+
+.vscode/
+
+survey/
+glm-output/
+llm-output/
+
+survey_raw/*
+*.zip
