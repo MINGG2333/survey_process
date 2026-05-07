@@ -216,17 +216,20 @@ def run_pipeline(
     survey_dir: Optional[str] = None,
     skip_doubao: bool = False,
     skip_dedup: bool = False,
+    force: bool = False,
     config_path: str = "config.yaml",
 ):
     """
     运行完整处理流程
 
     遍历 survey_raw 下的每个子目录（每套问卷），独立处理并输出各自的问答表。
+    默认跳过已生成合并结果的问卷，使用 --force 可强制重新处理。
 
     Args:
         survey_dir: 可选，指定只处理 survey_raw 下的某个子目录
         skip_doubao: 如果为 True，则跳过豆包 API 调用（用于调试/重跑去冗余和合并）
         skip_dedup: 如果为 True，则跳过 DeepSeek 去冗余（用于调试）
+        force: 如果为 True，则强制重新处理所有问卷（忽略已有结果）
         config_path: 配置文件路径
     """
     # 加载配置
@@ -262,6 +265,18 @@ def run_pipeline(
     # 逐套处理问卷
     results = {}  # survey_dir_name -> merged_table or None
     for dir_name in survey_dirs:
+        # 默认跳过已生成合并结果的问卷（除非 --force）
+        merged_md_path = os.path.join(output_root, dir_name, "merged_qa_table.md")
+        if not force and os.path.exists(merged_md_path):
+            logger.info(f"[{dir_name}] 已存在合并结果，跳过（使用 --force 可强制重新处理）")
+            # 读取已有结果用于统计
+            try:
+                with open(merged_md_path, "r", encoding="utf-8") as f:
+                    results[dir_name] = f.read()
+            except Exception:
+                results[dir_name] = ""
+            continue
+
         try:
             merged = process_single_survey(
                 survey_root=survey_root,
@@ -346,6 +361,8 @@ if __name__ == "__main__":
                         help="跳过豆包 API 调用，使用已有缓存")
     parser.add_argument("--skip-dedup", action="store_true",
                         help="跳过 DeepSeek 去冗余，直接拼接")
+    parser.add_argument("--force", action="store_true",
+                        help="强制重新处理所有问卷（默认跳过已完成的）")
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="配置文件路径（默认: config.yaml）")
 
@@ -355,5 +372,8 @@ if __name__ == "__main__":
         survey_dir=args.survey_dir,
         skip_doubao=args.skip_doubao,
         skip_dedup=args.skip_dedup,
+        force=args.force,
         config_path=args.config,
     )
+
+
