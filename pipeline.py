@@ -57,6 +57,37 @@ def setup_logger(output_root: str):
     return log_file
 
 
+def _load_dedup_cache(dedup_dir: str) -> Optional[Dict[str, str]]:
+    """
+    从缓存目录加载去冗余结果
+
+    检查 dedup 目录下是否存在完整的三个文件（prev_keep.md, prev_removed.md, next_adjusted.md），
+    且内容非空（prev_keep 和 next_adjusted 不能为空）。
+
+    Returns:
+        如果缓存有效，返回 dict {prev_keep, prev_removed, next_adjusted}；否则返回 None
+    """
+    required_files = ["prev_keep.md", "prev_removed.md", "next_adjusted.md"]
+    result = {}
+
+    for filename in required_files:
+        filepath = os.path.join(dedup_dir, filename)
+        if not os.path.exists(filepath):
+            return None
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return None
+        result[filename.replace(".md", "")] = content
+
+    # prev_keep 和 next_adjusted 不能为空（空内容说明缓存无效）
+    if not result.get("prev_keep", "").strip() or not result.get("next_adjusted", "").strip():
+        return None
+
+    return result
+
+
 def process_single_survey(
     survey_root: str,
     survey_dir_name: str,
@@ -83,6 +114,7 @@ def process_single_survey(
     overlap = config["batch"]["overlap"]
 
     logger.info(f"\n{'=' * 60}")
+
     logger.info(f"开始处理问卷: {survey_dir_name}")
     logger.info(f"{'=' * 60}")
 
@@ -108,21 +140,29 @@ def process_single_survey(
     logger.info(f"[{survey_dir_name}] Step 3: 调用豆包视觉大模型处理每批图片...")
     batch_tables = []
 
-    if skip_doubao:
-        logger.info(f"[{survey_dir_name}] 跳过豆包 API 调用（--skip-doubao 模式）")
-        for b in batches:
-            batch_dir = os.path.join(output_root, survey_dir_name, "doubao_batches", f"batch_{b.batch_index:03d}")
-            md_path = os.path.join(batch_dir, f"batch_{b.batch_index:03d}_response.md")
-            if os.path.exists(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                batch_tables.append(content)
-                logger.info(f"[{survey_dir_name}] 从缓存加载批次 {b.batch_index}: {md_path}")
+    for batch in batches:
+        # 先检查是否有可用的缓存（内容非空）
+        batch_dir = os.path.join(output_root, survey_dir_name, "doubao_batches", f"batch_{batch.batch_index:03d}")
+        md_path = os.path.join(batch_dir, f"batch_{batch.batch_index:03d}_response.md")
+        cached_content = None
+        if os.path.exists(md_path):
+            with open(md_path, "r", encoding="utf-8") as f:
+                cached_content = f.read().strip()
+
+        if skip_doubao:
+            # --skip-doubao 模式：只从缓存加载
+            if cached_content is not None:
+                batch_tables.append(cached_content)
+                logger.info(f"[{survey_dir_name}] 从缓存加载批次 {batch.batch_index}: {md_path}")
             else:
-                logger.warning(f"[{survey_dir_name}] 批次 {b.batch_index} 的存档不存在: {md_path}")
+                logger.warning(f"[{survey_dir_name}] 批次 {batch.batch_index} 的存档不存在: {md_path}")
                 batch_tables.append("")
-    else:
-        for batch in batches:
+        elif cached_content:
+            # 非 skip 模式但缓存存在且非空：跳过 API 调用，直接使用缓存
+            batch_tables.append(cached_content)
+            logger.info(f"[{survey_dir_name}] 批次 {batch.batch_index} 缓存有效，跳过 API 调用")
+        else:
+            # 无有效缓存：调用 API
             try:
                 md_content, md_path, metadata = call_doubao(batch, config, sub_dir=survey_dir_name)
                 batch_tables.append(md_content)
@@ -132,6 +172,7 @@ def process_single_survey(
                 logger.warning(f"[{survey_dir_name}] 批次 {batch.batch_index} 使用空表继续")
                 batch_tables.append("")
                 raise e
+
 
     logger.info(f"[{survey_dir_name}] 豆包处理完成，共得到 {len(batch_tables)} 份问答表")
 
@@ -155,8 +196,25 @@ def process_single_survey(
 
             if not prev_table or not next_table:
                 logger.warning(f"[{survey_dir_name}] 批次 {i} 或 {i+1} 的表格为空，跳过去冗余")
-                if prev_table:
-                    dedup_results.append(prev_table)
+                # 即使跳过，也要用 dict 格式占位，保证后续循环能统一处理
+                dedup_results.append({
+                    "prev_keep": prev_table if prev_table else "",
+                    "prev_removed": "",
+                    "next_adjusted": next_table if next_table else "",
+                })
+                continue
+
+            # 检查是否有可用的去冗余缓存
+            dedup_dir = os.path.join(output_root, survey_dir_name, "dedup", f"batch_{i:03d}_to_{i+1:03d}")
+            cached_result = _load_dedup_cache(dedup_dir)
+            if cached_result is not None:
+                dedup_results.append(cached_result)
+                logger.info(
+                    f"[{survey_dir_name}] 从缓存加载去冗余结果（batch_{i}->{i+1}）: "
+                    f"前一批保留={len(cached_result.get('prev_keep', ''))}字符, "
+                    f"移除={len(cached_result.get('prev_removed', ''))}字符, "
+                    f"后一批调整={len(cached_result.get('next_adjusted', ''))}字符"
+                )
                 continue
 
             try:
@@ -183,10 +241,15 @@ def process_single_survey(
                     "next_adjusted": next_table,
                 })
 
+
+        # 从 dedup_results 重建 final_tables
+        # dedup_results[i] 对应 batch_i 和 batch_{i+1} 的去冗余结果
+        # 取第一个结果的 prev_keep 作为 batch_0，然后每个结果的 next_adjusted 作为后续批次
         for i, result in enumerate(dedup_results):
             if i == 0:
-                final_tables.append(result.get("prev_keep", batch_tables[i]))
-            final_tables.append(result.get("next_adjusted", batch_tables[i + 1]))
+                final_tables.append(result.get("prev_keep", batch_tables[i]) if isinstance(result, dict) else batch_tables[i])
+            final_tables.append(result.get("next_adjusted", batch_tables[i + 1]) if isinstance(result, dict) else batch_tables[i + 1])
+
 
         if not final_tables:
             final_tables = batch_tables
